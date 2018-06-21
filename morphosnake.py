@@ -19,6 +19,7 @@ import json
 import sys
 import os.path
 import pickle
+import cv2
 
 
 # list of all keys measuring lengths - these are scaled with px_mm
@@ -35,6 +36,7 @@ angle_keys = ['alpha', 'alpha_e']
 background_color = (0.2,0.2,0.2)
 leaf_color = (0.1,0.5,0)
 skel_color = (0.2,0.9,0)
+contour_color = (0,0,0.9)
 node_color = (1.0,0.2,1)
 node_color_fertile = (1.0,1.0,0.0)
 node_color_carac = (1.0,0.0,0.0)
@@ -53,6 +55,8 @@ select_disk_alpha = .5
 # color maps for imshow
 leaf_colors = matplotlib.colors.ListedColormap([leaf_color, background_color]) # can also give triples of rgb floats: (1,.3,.1)
 skel_colors = matplotlib.colors.ListedColormap([skel_color])
+
+contour_colors = matplotlib.colors.ListedColormap([contour_color])
 
 # from http://rosettacode.org/wiki/Zhang-Suen_thinning_algorithm
 def neighbours(i, x, y):
@@ -813,10 +817,9 @@ def lineEquation(p,q):
 #find the line perpedicular to y = m*x + n passing by the point p
 def perpendicularLineEquation(m,n,p):
     x_p, y_p = p
-    new_m = -1/m;
+    new_m = -1/m
     new_n = y_p - new_m*x_p
     return new_m, new_n
-
 
 # divides the plane in 4 quadrants using the line passing by p and q and the perpedicular line
 # passing by p. return the 2 quadrants on the same side as q.
@@ -913,6 +916,109 @@ def MoyAngleStrahler(G):
     print(moyAngle)
     print(moyAngle_e)
 
+#find the equation of the straight line given a point and an angle
+
+def lineEqAngle(p,alpha):
+    x_p,y_p = p
+    m = np.tan(alpha)
+    n = y_p - m * x_p
+    return m,n
+
+def findCone(shape,p,alpha,d_alpha):
+    m1,n1 = lineEqAngle(p,alpha-d_alpha)
+    m2,n2 = lineEqAngle(p,alpha+d_alpha)
+    s = []
+    for (x_n, y_n) in shape:
+        if y_n > m1 * x_n + n1 and y_n < m2 * x_n + n2:
+            s.append((x_n, y_n))
+    #print("call to find cone")
+    #print('Node (%5.1f, %5.1f)'%p)
+    #print(s)
+    return s
+
+# p is an (x, y) tuple, s is a list of (x, y) tuples .
+# return the point in s closest to p.
+def findFurthest(s, p):
+    ds = [distsq(p, q) for q in s]
+    return s[ds.index(max(ds))]
+
+#transforms the contours retourned by cv2 function to a list of couples
+#shape is a two dimensional array containing the separated contours
+#shape_all is the list of every contour pixel
+def contourToList(contours):
+    shape = []
+    shape_all = []
+    for i in range(1,len(contours)):
+        shape_i = []
+        for j in range(0,len(contours[i])):
+            shape_i.append((contours[i][j][0][0],contours[i][j][0][1]))
+            shape_all.append((contours[i][j][0][0],contours[i][j][0][1]))
+        shape.append(shape_i)
+    return shape,shape_all
+
+
+def colorLine(img,p,q):
+    x1,y1 = p
+    x2,y2 =q
+    coords = bresenham(x1,y1,x2,y2)
+    for i in range(0,len(coords)):
+        x,y = coords[i]
+        img[y][x-2] = False
+        img[y][x-1] = False
+        img[y][x] = False
+        img[y][x+1] = False
+        img[y][x+2] = False
+    return img
+
+def finalStrat(img,contours,alpha,d_alpha,root):
+    shape,shape_all = contourToList(contours)
+    for i in range(1,len(shape)):
+        pClose = findClosest(shape[i],root)
+        p = findFurthest(shape[i],root)
+        if(pClose[1] < p[1]):
+            k = findCone(shape_all,p,alpha,d_alpha)
+        else:
+            k = findCone(shape_all,p,-alpha,d_alpha)
+        q = findClosest(k,p)
+        img = colorLine(img,p,q)
+    width = img.shape[1]
+    height= img.shape[0]
+    return img
+
+#https://mail.scipy.org/pipermail/scipy-user/2009-September/022602.html
+
+def bresenham(x,y,x2,y2):
+    steep = 0
+    coords = []
+    dx = abs(x2 - x)
+    if (x2 - x) > 0: sx = 1
+    else: sx = -1
+    dy = abs(y2 - y)
+    if (y2 - y) > 0: sy = 1
+    else: sy = -1
+    if dy > dx:
+        steep = 1
+        x,y = y,x
+        dx,dy = dy,dx
+        sx,sy = sy,sx
+    d = (2 * dy) - dx
+    for i in range(0,dx):
+        if steep: coords.append((y,x))
+        else: coords.append((x,y))
+        while d >= 0:
+            y = y + sy
+            d = d - (2 * dx)
+        x = x + sx
+        d = d + (2 * dy)
+    return coords
+
+def findAngleMoy(G):
+    angle = []
+    for n in G:
+        for n2 in G[n]:
+            if G[n][n2]['Strahler'] != 1:
+                angle.append(G[n][n2]['alpha'])
+    return np.median(np.array(angle))
 
 ###################################################################################
 # Main code starts here
@@ -979,10 +1085,19 @@ print()
 print('Reading image %s'%filename)
 img = mh.imread(filename)
 
+#Finding the contours of the image, useful to remark loops 
+
+imgray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+ret, thresh = cv2.threshold(imgray, 127, 255, 0)
+im2, contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+
+
+
 # color image handling - works if the background is brighter than the object
 if len(img.shape) == 3: #color image
     #convert to grayscale
     img = mh.colors.rgb2gray(img, dtype=np.uint8)
+  
 
 # thresholding
 T_otsu = mh.otsu(img) # finds a numeric threshold
@@ -1002,11 +1117,13 @@ print('Thinning...')
 # Zhang-Suen algorithm (apparently with staircase removal)
 skel = morphology.skeletonize(img)
 
+
 # Try mahotas skeletonization. Makes many spikes.
 # works better after mh.close(), but still splits many tips in two.
 # Also gives staircases in the skeleton.
 #skel = mh.thin(img)  
 #skel = morphology.skeletonize(skel)  # one pass of the other skeletonization to remove staircases
+
 
 
 ################
@@ -1017,11 +1134,11 @@ t, j = terminals(skel)
 
 if root == None:
     # unpack the tuples to separate lists of x:s and y:s, for plotting and root selection
-    #tx = [x[0] for x in t]
-    ty = [x[1] for x in t]
+    tx = [x[0] for x in t]
+    #ty = [x[1] for x in t]
 
-    # find the index of the lowest terminal. Use that as the root, for now.
-    iroot = ty.index(max(ty))
+    # find the index of the left-most terminal. Use that as the root, for now.
+    iroot = tx.index(min(tx))
 
     # find the lowest node, to use as root
     root = t[iroot]
@@ -1035,13 +1152,14 @@ else:
 print('Plotting')
 # create a copy of the boolean skeleton for further use
 skel2 = skel
+
 # make the skeleton image's background transparent
 skel    = np.ma.masked_where(skel==0, skel)
 #visited = np.ma.masked_where (visited==0, visited)
 
 fig = plt.figure()
 fig2 = fig
-
+'''
 # Plot images. Inversion here is just for nicer coloring
 # interpolation=nearest is to turn smoothing off.
 
@@ -1056,6 +1174,7 @@ plt.imshow(~img, cmap=leaf_colors, interpolation="nearest")
 plt.imshow(skel, cmap=skel_colors,  interpolation="nearest")
 #plt.imshow(visited, cmap=mpl.cm.cool,  interpolation="nearest")
 
+'''
 # Find the contour of the image:
 contour = findContour(~img)
 
@@ -1105,7 +1224,46 @@ try:
 except:
     # could not read the graph. Constructing it now
     G = buildGraph(img, skel)
+
+#Lets check for Loops:
+
+if(len(contours)>2):
+    print("Image with Loops detected, attempting automatic unLooping")
+    alpha = np.pi - findAngleMoy(G)
+    img = finalStrat(img,contours,alpha,np.pi/5,root)
+    print('alpha')
+    print(alpha)
+    print('Thinning...')
+    skel = morphology.skeletonize(img)
+    print('Features...')
+    t, j = terminals(skel)
+    skel2 = skel
+    skel  = np.ma.masked_where(skel==0, skel)
+    fig = plt.figure()
+    width = skel.shape[1]
+    height= skel.shape[0]
     
+    plt.axis((0,width,height,0))
+    plt.imshow(~img, cmap=leaf_colors, interpolation="nearest")
+    plt.imshow(skel, cmap=skel_colors,  interpolation="nearest")
+   
+    G = buildGraph(img, skel)
+
+# Copied from 1170 to test
+# Plot images. Inversion here is just for nicer coloring
+# interpolation=nearest is to turn smoothing off.
+else:
+    width = skel.shape[1]
+    height= skel.shape[0]
+
+    plt.axis((0,width,height,0))
+
+    plt.imshow(~img, cmap=leaf_colors, interpolation="nearest")
+
+    plt.imshow(skel, cmap=skel_colors,  interpolation="nearest")
+    #plt.imshow(visited, cmap=mpl.cm.cool,  interpolation="nearest")
+   
+
 # handles to plot elements
 nodes = None
 edges = None
@@ -1116,7 +1274,9 @@ rad=[]
 plot_graph(G)
 
 # semi-transparent circles on the nodes
+
 Cercle = {}
+
 for p,r in zip(G, rad):
 	Cercle[p] = plt.Circle(p, radius=r, alpha=terminal_disk_alpha, color=terminal_disk_color)
 	plt.gca().add_patch(Cercle[p])
@@ -1343,7 +1503,6 @@ print('Saving the database...')
 of = open(leavesFile, "wt")
 json.dump(leaves, of, sort_keys=True, indent=2, separators=(',', ': '))
 print('done.')
-
 
 
 
